@@ -20,6 +20,7 @@ export function createLightPool(G, { count } = {}) {
     slots,
     // shape: intensity * (1-u)^2 with optional flicker (fire). distance = hard cutoff radius (perf + no leaks)
     flash(x, y, z, r, g, b, intensity, life = 0.06, distance = 8, flicker = 0) {
+      if (!slots.length) return null; // count: 0 → flashes are visual-only
       let s = slots[0];
       for (const c of slots) { if (c.age >= c.life) { s = c; break; } if (c.born < s.born) s = c; }
       s.l.position.set(x, y, z); s.l.color.setRGB(r, g, b); s.l.distance = distance;
