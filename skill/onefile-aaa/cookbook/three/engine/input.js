@@ -9,8 +9,15 @@
 //   });
 //   // bots (tools/playtest.mjs): __input.look(dx,dy)  __input.hold('forward', 800)  __input.press('jump')
 //
-// Modes (input.mode): 'lock' (pointer lock), 'drag' (lock refused/unavailable: hold a mouse button and drag; a
-// banner explains it once), 'touch' (first touch switches; twin-stick + buttons), 'pad' (last input was a gamepad).
+// Modes (input.mode): 'lock' (pointer lock), 'drag' (lock API missing or refused 3 times in a row: hold a mouse button
+// and drag; a banner explains it once), 'touch' (first touch switches; twin-stick + buttons), 'pad' (last input was a gamepad).
+// Pointer lock: requested synchronously from the gesture (click / Enter); { unadjustedMovement } first, plain on
+// NotSupported (Linux, some Wayland compositors) and remembered; a refused or timed-out request is NOT permanent: a
+// "click to capture" hint shows ('input:lockfail') and the next click retries. A lock that was held and is lost
+// (Esc, alt-tab) emits 'input:unlock' so the game pauses with "click to resume". While unlocked in lock
+// mode raw mouse motion never steers; movementX/Y spikes (lock (re)acquisition, compositor warps) are dropped.
+// The canvas hides the cursor while input is enabled (in play; opts.hideCursor, off when lockOnClick is false). Mouse buttons use mousedown/up (pointer events fold
+// chorded presses such as LMB-then-RMB into pointermove, which lost turbo / stuck fire).
 // All values are latched once per frame on G 'preupdate' (before every 'update' listener), so creation order does not matter.
 import { Vector2 } from 'three';
 
@@ -34,7 +41,10 @@ export function createInput(G, opts = {}) {
     touchButtons = ['jump', 'fire', 'interact'],
     target = G.canvas,
     dragStyle = 'hover',      // drag-mode look: 'hover' = plain mouse motion turns, resting at a screen edge keeps
-                              // turning (fire/aim clicks stay free); 'button' = hold a button and drag
+                              // turning (fire/aim clicks stay free); 'button' = only while a mouse button is held
+                              // (that button still fires its action)
+    hideCursor = lockOnClick, // hide the canvas cursor in play; false for cursor-driven games (RTS, point-and-click)
+    spikePx = 100,            // look-spike filter: px per ms since the last move event (floor 400 px); 0 = off
     edgeRate = 1.6,
     alwaysOn = ['pause'],     // actions that still latch while input.enabled = false (menus must be able to resume)           // rad/s yaw while the cursor rests in the outer 5% (hover style)
   } = opts;
@@ -67,6 +77,7 @@ export function createInput(G, opts = {}) {
     if (down) keysDown.add(e.code); else keysDown.delete(e.code);
     if (!list) return;
     if (list.includes('map') || (I.locked && e.code === 'Space')) e.preventDefault();
+    if (down && e.code === 'Escape' && performance.now() - unlockAt < 300) return; // the Esc that just ended the lock
     let on = false;
     for (const a of list) { on = false; for (const c of bindings[a]) if (keysDown.has(c)) on = true; setRaw(a, KEY, on); }
   };
@@ -77,52 +88,97 @@ export function createInput(G, opts = {}) {
 
   // ---- mouse: pointer lock, drag fallback ----
   let dragging = false, lastX = 0, lastY = 0, hasLast = false, curX = -1, curY = -1, inside = false, lockPending = 0;
+  let noUnadjusted = false, lockFails = 0, lockAt = 0, unlockAt = 0, lockSeq = 0, cursorHidden = false;
+  const SETTLE = 60;   // ms after a lock change: movement in this window is the (re)acquisition jump, not a flick
+  let moveAt = 0;      // time of the previous locked move event (the spike limit scales with the gap)
   const onLeave = () => { inside = false; hasLast = false; };
   document.addEventListener('mouseleave', onLeave);
   const mouseAct = (btn, on) => { const l = codeToActions.get('Mouse' + btn); if (l) for (const a of l) setRaw(a, MOUSE, on); };
-  const requestLock = () => {
-    if (I.lockFailed || !target.requestPointerLock) return toDrag('unsupported');
-    lockPending = performance.now();
-    try {
-      const p = target.requestPointerLock({ unadjustedMovement: true });
-      if (p && p.catch) p.catch(() => {
-        // unadjustedMovement unsupported on some platforms: retry plain once, then give up → drag
-        try { const p2 = target.requestPointerLock(); if (p2 && p2.catch) p2.catch(() => toDrag('refused')); } catch { toDrag('refused'); }
-      });
-    } catch { toDrag('threw'); }
-    // some embedders (iframes without allow-pointer-lock, automation) neither lock nor error: time out
-    setTimeout(() => { if (!I.locked && lockPending && performance.now() - lockPending >= 900) toDrag('timeout'); }, 1000);
+  // a failed request: retry on the next click; only a missing API or 3 refusals in a row fall back to drag mode
+  let gesture = true, legacyReq = false;                                  // was the pending request made inside a user gesture?
+  const lockFail = (why, seq) => {
+    if (seq !== lockSeq || I.locked) return;          // stale (a newer request is in flight) or it locked after all
+    lockPending = 0; I.lockReason = why;
+    if (!gesture) return;                              // scripted start (?autostart, bots): stay unlocked, the next click locks
+    lockFails++;
+    if (lockFails >= 3) { toDrag(why); return; }
+    // never captured: no pause (nothing was lost), a hint instead; the free cursor shows and does not steer, and the
+    // next click on the canvas retries. Only a lock that was held and then lost emits 'input:unlock' (→ pause screen).
+    showBanner('Click to capture the mouse', 'Mouse look needs pointer lock · the cursor will not steer until then', 4000);
+    G.emit('input:lockfail', why);
   };
+  const requestLock = () => {
+    if (I.locked) return;
+    if (!target.requestPointerLock) return toDrag('unsupported');
+    if (I.lockFailed) return;                          // permanent drag mode: clicks drag, no retry storm
+    const seq = ++lockSeq;
+    lockPending = performance.now();
+    const ua = navigator.userActivation; gesture = ua ? ua.isActive : true;
+    legacyReq = false;
+    const plain = () => {
+      try { const p2 = target.requestPointerLock(); legacyReq = !(p2 && p2.catch); if (p2 && p2.catch) p2.catch((e) => lockFail(e && e.name || 'refused', seq)); }
+      catch (e) { lockFail('threw', seq); }
+    };
+    if (noUnadjusted) plain();
+    else {
+      try {
+        const p = target.requestPointerLock({ unadjustedMovement: true });
+        if (p && p.catch) p.catch((e) => {
+          // raw input unsupported (Linux / Wayland): plain lock, still inside the click's transient activation
+          if (e && e.name === 'NotSupportedError') { noUnadjusted = true; if (seq === lockSeq && !I.locked) plain(); }
+          else lockFail(e && e.name || 'refused', seq);
+        });
+        else if (!p) { noUnadjusted = true; legacyReq = true; } // pre-promise browsers ignore the options object
+      } catch (e) { noUnadjusted = true; plain(); }
+    }
+    // some embedders (iframes without allow-pointer-lock, automation) neither lock nor error: time out
+    setTimeout(() => { if (seq === lockSeq && !I.locked && lockPending) lockFail('timeout', seq); }, 1500);
+  };
+  let touchAt = -1e9;                                  // mouse events synthesised from touch are ignored
+  let btns = 0;                                        // mouse buttons held (bitmask, from mousedown/up)
   const onDown = (e) => {
-    if (!I.enabled) return;
-    if (I.mode === 'touch' && e.pointerType === 'touch') return;
-    if (e.pointerType === 'touch') return;
+    if (!I.enabled || performance.now() - touchAt < 800) return;
     if (I.mode === 'touch' || I.mode === 'pad') I.mode = I.lockFailed ? 'drag' : 'lock';
-    if (I.mode === 'lock' && !I.locked && lockOnClick) { requestLock(); return; }
-    if (I.mode === 'drag') { dragging = true; lastX = e.clientX; lastY = e.clientY; }
-    if (I.mode === 'drag' && dragStyle === 'button') return; // button drags only, no fire on drag
+    if (I.mode === 'lock' && !I.locked && lockOnClick) { requestLock(); return; } // this click only captures the mouse
+    btns |= 1 << e.button;
+    if (I.mode === 'drag') { dragging = true; lastX = e.clientX; lastY = e.clientY; hasLast = true; }
     mouseAct(e.button, true);
   };
-  const onUp = (e) => { if (e.pointerType === 'touch') return; dragging = false; mouseAct(e.button, false); };
+  const onUp = (e) => { btns &= ~(1 << e.button); if (!btns) dragging = false; mouseAct(e.button, false); };
   const onMove = (e) => {
     if (e.pointerType === 'touch' || !I.enabled) return;
-    if (I.locked) { accX += e.movementX * I.sens; accY += e.movementY * I.sens; }
-    else if (I.mode === 'drag' && (dragging || dragStyle === 'hover')) {
+    if (I.locked) {
+      const mx = e.movementX || 0, my = e.movementY || 0, now = performance.now();
+      // browsers deliver ONE pointermove per frame (movementX = the sum since the last one), so the limit follows the
+      // gap: a fixed px cap would eat ordinary turns at low frame rates and fast flicks on high-DPI mice
+      const lim = spikePx > 0 ? Math.max(400, spikePx * Math.min(250, now - moveAt)) : Infinity;
+      moveAt = now;
+      if (now - lockAt > SETTLE && Math.abs(mx) < lim && Math.abs(my) < lim) { accX += mx * I.sens; accY += my * I.sens; }
+    } else if (I.mode === 'drag' && (dragging || dragStyle === 'hover')) {
       if (hasLast) { accX += (e.clientX - lastX) * I.sens; accY += (e.clientY - lastY) * I.sens; }
       lastX = e.clientX; lastY = e.clientY; hasLast = true;
-    }
+    }                                                  // lock mode but not locked: a free cursor never steers
     curX = e.clientX; curY = e.clientY; inside = true;
   };
-  target.addEventListener('pointerdown', onDown);
-  addEventListener('pointerup', onUp);
+  target.addEventListener('mousedown', onDown);
+  addEventListener('mouseup', onUp);
   addEventListener('pointermove', onMove);
   target.addEventListener('contextmenu', (e) => e.preventDefault());
   const onLockChange = () => {
+    const was = I.locked;
     I.locked = document.pointerLockElement === target;
-    if (I.locked) { lockPending = 0; I.mode = 'lock'; hideBanner(); }
-    else { for (const a of actions) raw[a] &= ~MOUSE; G.emit('input:unlock'); } // games usually pause here
+    if (I.locked) { lockPending = 0; lockFails = 0; lockAt = performance.now(); I.mode = 'lock'; I.lockFailed = false; hideBanner(); }
+    else if (was) {
+      unlockAt = performance.now(); btns = 0; dragging = false;
+      for (const a of actions) raw[a] &= ~MOUSE;
+      // Esc released the lock: that same Esc must not also toggle the pause the game is about to show
+      if (raw.pause) raw.pause &= ~KEY; pressQ.pause = false;
+      G.emit('input:unlock', 'exit');                  // games pause here and show "click to resume"
+    }
   };
-  const onLockError = () => toDrag('pointerlockerror');
+  // the promise rejection carries the reason; this event also fires for legacy (promise-less) implementations
+  // (with promises it also fires for the unadjustedMovement refusal we retry from, so it is ignored there)
+  const onLockError = () => { if (lockPending && legacyReq) lockFail('pointerlockerror', lockSeq); };
   document.addEventListener('pointerlockchange', onLockChange);
   document.addEventListener('pointerlockerror', onLockError);
 
@@ -132,16 +188,21 @@ export function createInput(G, opts = {}) {
     lockPending = 0;
     if (I.locked) return;
     I.lockFailed = true; I.mode = 'drag'; I.lockReason = why;
-    if (bannerShown || G.params.get('shot')) return;
+    if (bannerShown) return;
     bannerShown = true;
+    showBanner('Mouse capture unavailable', dragStyle === 'hover' ? 'Move the mouse to look · rest it at a screen edge to keep turning' : 'Hold a mouse button and drag to look', 6000);
+    G.emit('input:drag', why);
+  }
+  function showBanner(head, body, ms) {
+    if (G.params.get('shot')) return;
+    if (banner) { banner.remove(); banner = null; }
     banner = document.createElement('div');
     banner.className = 'ui input-banner';
-    banner.innerHTML = '<b>Mouse capture unavailable</b><span>' + (dragStyle === 'hover' ? 'Move the mouse to look · rest it at a screen edge to keep turning' : 'Hold a mouse button and drag to look') + '</span>';
+    banner.innerHTML = '<b></b><span></span>'; banner.firstChild.textContent = head; banner.lastChild.textContent = body;
     banner.style.cssText = 'position:fixed;left:50%;bottom:12%;transform:translateX(-50%);display:flex;flex-direction:column;gap:4px;align-items:center;padding:10px 18px;background:rgba(8,10,14,.78);color:#e9e4da;font:500 12px/1.3 system-ui,sans-serif;letter-spacing:.08em;border:1px solid rgba(255,255,255,.14);border-radius:3px;pointer-events:none;z-index:50;transition:opacity .6s';
     banner.firstChild.style.cssText = 'font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#ffcf8a';
     root.appendChild(banner);
-    setTimeout(hideBanner, 6000);
-    G.emit('input:drag', why);
+    const b = banner; setTimeout(() => { if (banner === b) hideBanner(); }, ms);
   }
   function hideBanner() { if (!banner) return; const b = banner; banner = null; b.style.opacity = '0'; setTimeout(() => b.remove(), 700); }
 
@@ -169,6 +230,7 @@ export function createInput(G, opts = {}) {
     root.appendChild(touchUI);
   }
   const onTouchDown = (e) => {
+    if (e.pointerType === 'touch') touchAt = performance.now();
     if (e.pointerType !== 'touch' || !I.enabled) return;
     I.mode = 'touch'; buildTouchUI(); e.preventDefault();
     const kind = e.clientX < innerWidth * 0.45 && ![...touches.values()].some((t) => t.kind === 'move') ? 'move' : 'look';
@@ -243,6 +305,9 @@ export function createInput(G, opts = {}) {
   // ---- per-frame latch ----
   I.update = (dt) => {
     pollPad();
+    // no cursor over the canvas during play (shown only while waiting for a click to capture the mouse)
+    const hide = hideCursor && I.enabled && I.mode !== 'touch' && !(I.mode === 'lock' && !I.locked && !I.lockFailed && lockFails > 0);
+    if (hide !== cursorHidden) { cursorHidden = hide; target.style.cursor = hide ? 'none' : ''; }
     for (let i = 0; i < actions.length; i++) {
       const a = actions[i];
       prev[a] = cur[a];
@@ -269,8 +334,8 @@ export function createInput(G, opts = {}) {
   (G.statsHooks ||= []).push(() => ({ input: { mode: I.mode, locked: I.locked, lockFailed: I.lockFailed } }));
   I.dispose = () => {
     removeEventListener('keydown', kd); removeEventListener('keyup', ku); removeEventListener('blur', blur);
-    target.removeEventListener('pointerdown', onDown); target.removeEventListener('pointerdown', onTouchDown);
-    removeEventListener('pointerup', onUp); removeEventListener('pointermove', onMove);
+    target.removeEventListener('mousedown', onDown); target.removeEventListener('pointerdown', onTouchDown);
+    removeEventListener('mouseup', onUp); removeEventListener('pointermove', onMove);
     removeEventListener('pointermove', onTouchMove); removeEventListener('pointerup', onTouchUp); removeEventListener('pointercancel', onTouchUp);
     document.removeEventListener('mouseleave', onLeave);
     document.removeEventListener('pointerlockchange', onLockChange); document.removeEventListener('pointerlockerror', onLockError);

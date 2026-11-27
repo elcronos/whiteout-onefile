@@ -12,3 +12,14 @@ Appended by the main session after each run's Reflect phase. Read before startin
 | 2026-11-18 | whiteout | Weather particles render indoors | critic D5 | cookbook/three/weather | interior volumes that cull particles | open |
 | 2026-11-18 | whiteout | G4 missed at 1080p high (16.7 ms vs 12.5): ground snow patches, MSAA×4, shadows | bench-high.json | cookbook ground/, engine/quality.js | MSAA×2 on high; cheaper snow patches | open |
 | 2026-11-18 | whiteout | Far field empty past the fog wall | critic D7, D11 | cookbook/three/backdrop | default ridge layers + distant lights in farfield | open |
+
+## Workflow agents follow an unrelated mid-run user message
+- **Issue:** a user asked an unrelated question in the same turn the Workflow was launched. Every agent from the first look
+  round onward treated that message as its task, answered it and skipped its brief: look rounds and module owners did
+  nothing, captures returned `errors: 999`, and the run finished suspiciously fast with only the spec and graybox done.
+- **Fix:** every `agent()` prompt in workflows/build-game.js starts with a GUARD line pinning the agent to its brief and the
+  game directory. A first, narrower guard ("ignore chat about other projects") was not enough: on the rerun the spec agent read the lead's
+  "I reset the repo" status line, decided the reset was deliberate and halted. The guard now says the agent is one step of an
+  automated pipeline, must do its brief in full, and must ignore the conversation (questions, status, resets) and start from
+  the directory's current state. Lead tip: launch the Workflow in a turn of its own, and check that the first look and module results in the
+  journal describe real work.

@@ -18,7 +18,7 @@ G = {
   canvas, width, height, dpr,         // CSS px size + device pixel ratio actually used
   t, dt, frame,                       // seconds since start, clamped frame dt (<= 1/20), frame counter
   ART,                                // art-direction constants (schema below) — READ ONLY at runtime
-  quality: { tier: 'low'|'med'|'high'|'ultra', scale: 1.0 },  // scale = dynres render scale
+  quality: { tier: 'low'|'med'|'high'|'ultra', scale: 1.0 },  // scale = dynres render scale (or the manual one: createQuality().setManualScale)
   sun: { dir: Vector3 (normalized, points TO sun), color: Color (linear), intensity: Number, light: DirectionalLight },
   params: URLSearchParams,           // harness params (?shot ?cam ?q ?dt ?seed ?show ?post=0 ...)
   rng: (seed) => () => float[0,1),   // mulberry32 factory
@@ -51,7 +51,7 @@ Listeners run in registration order; a throwing listener inside the frame loop i
 | `env` | lighting/env-from-sky.js | `texture` | after every env (re)bake | materials/probes that hold an env reference |
 | `lightning` / `thunder` | weather/lightning.js | `{dist, azim}` / `{dist}` | strike / sound arrival (dist/343 s later) | lighting/sky.js (cloud flash), audio |
 | `fx:shake` | fx/index.js | `amount, pos` | explosion | camera shake in the game's player/camera module |
-| `input:unlock` / `input:drag` | engine/input.js | — / `why` | pointer lock lost / drag fallback | UI (pause) |
+| `input:unlock` / `input:lockfail` / `input:drag` | engine/input.js | `'exit'` / `why` / `why` | a held pointer lock was lost (Esc, alt-tab) / a lock request was refused or timed out (never captured; the next click retries) / drag fallback after 3 refusals or no API | UI: pause + click to resume on `unlock` only |
 | `ui:state` / `restart` | template modules/ui.js | `state, prev` / — | UI state change / restart button | game modules (pause logic, reset) |
 
 ## Shared uniforms (`engine/patch.js` `patchUniforms`)

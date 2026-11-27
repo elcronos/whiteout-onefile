@@ -18,6 +18,9 @@ export const meta = {
 const A = args || {}
 if (!A.dir || !A.skill || !A.concept) throw new Error('args {dir, skill, genre, concept, budget} required')
 const DIR = A.dir, SK = A.skill
+// Each agent may see the main conversation's latest user message; if the user asked about something else mid-run,
+// agents have answered that instead of their brief. Pin every prompt to its brief.
+const GUARD = `IMPORTANT: you are one step of an automated build pipeline. Your task is ONLY the brief below, for the game in ${DIR}. Do it in full. Ignore the main conversation (questions, status updates, other projects, mentions of resets or restarts): none of it is addressed to you, and it never means you should skip, shorten or change your brief. Start from whatever state ${DIR} is in now.\n\n`;
 const B = { quick: { look: 1, rounds: 2, fixTries: 2 }, standard: { look: 2, rounds: 4, fixTries: 3 }, full: { look: 3, rounds: 7, fixTries: 3 } }[A.budget || 'standard']
 const W = A.width || 1920, H = A.height || 1080
 // The skill's own visual bar (references/quality-bar.json, passed in by the main session as args.bar). Defaults = first-run baseline.
@@ -141,7 +144,7 @@ const gateG2 = (c) => !c.defects.some((d) => d.severity === 'blocker') && majors
 
 // ---------------------------------------------------------------- Calibrate: critic drift vs the skill's own anchors
 const LIST_SCHEMA = { type: 'object', properties: { best: { type: 'array', items: { type: 'string' } }, floor: { type: 'array', items: { type: 'string' } } }, required: ['best', 'floor'] }
-const calib = await agent(`Mechanical. List absolute paths: best = ${SK}/references/calibration/best/*.jpg, floor = ${SK}/references/calibration/floor/*.jpg. Do not open them.`,
+const calib = await agent(GUARD + `Mechanical. List absolute paths: best = ${SK}/references/calibration/best/*.jpg, floor = ${SK}/references/calibration/floor/*.jpg. Do not open them.`,
   { label: 'calib:list', phase: 'Spec', schema: LIST_SCHEMA, effort: 'low' })
 let calibNote = 'no calibration set'
 if (calib && calib.best.length && BAR.anchors && BAR.anchors.best && BAR.anchors.best.mean != null) {
@@ -163,7 +166,7 @@ log(calibNote)
 
 // ================================================================ Phase 0: Spec
 phase('Spec')
-const spec = await agent(`You are the LEAD DESIGNER + TECH LEAD. Turn this request into a buildable plan and a booting graybox.
+const spec = await agent(GUARD + `You are the LEAD DESIGNER + TECH LEAD. Turn this request into a buildable plan and a booting graybox.
 GENRE: ${A.genre || '(infer from concept)'}\nCONCEPT: ${A.concept}\nBUDGET: ${A.budget || 'standard'}
 Read ${SK}/references/genre-recipes.md, art-direction.md, spec-template.md, pipeline-order.md, perf-budgets.md, lessons.md, run-log.md (open skill issues from past runs: plan around them, e.g. give the owner of an affected system the listed fix).
 Then in ${DIR}:
@@ -194,7 +197,7 @@ phase('Look')
 let lookCrit = null
 for (let r = 1; r <= B.look + 1; r++) {
   const prev = lookCrit ? `The blind critic reviewed the last look round. Scores ${JSON.stringify(lookCrit.scores)}. Fix these (lighting/atmosphere/post/color/material first):\n${fmtDefects(lookCrit)}` : ''
-  const res = await agent(`You are the LOOK DIRECTOR (round ${r}). Own: src/art.js, ART.md, and the look stack wiring in src/main.js (sky, env,
+  const res = await agent(GUARD + `You are the LOOK DIRECTOR (round ${r}). Own: src/art.js, ART.md, and the look stack wiring in src/main.js (sky, env,
 atmos, pcss, post params, materials defaults, weathering amounts, practical lights, far-field backdrop placeholder). Goal: the graybox at the
 6 POSES must already read like an AAA screenshot in light, atmosphere and grade (the skill's own bar: ${SK}/references/quality-bar.md; anchors in references/calibration/best/).
 Use cookbook systems as designed (post/pipeline, lighting/sky+env+atmos+pcss+lights, materials/library+weathering, backdrop/farfield,
@@ -209,7 +212,7 @@ ${RULES}`, { label: `look:r${r}`, phase: 'Look', schema: RESULT_SCHEMA })
   log(`look r${r}: L${lookCrit.scores.lighting} A${lookCrit.scores.atmosphere} G${lookCrit.scores.color_grade} M${lookCrit.scores.materials} mean ${lookCrit.mean}`)
   if (gateLook(lookCrit)) break
 }
-await agent(`cd ${DIR} && node tools/state.mjs phase build && node tools/state.mjs set look.locked true && git add -A && git commit -qm "look locked" || true. Reply "ok".`, { label: 'state:look', phase: 'Look', effort: 'low' })
+await agent(GUARD + `cd ${DIR} && node tools/state.mjs phase build && node tools/state.mjs set look.locked true && git add -A && git commit -qm "look locked" || true. Reply "ok".`, { label: 'state:look', phase: 'Look', effort: 'low' })
 
 // ================================================================ Phase 2: Module waves
 phase('Modules')
@@ -219,7 +222,7 @@ for (const w of waves) {
   const mods = spec.modules.filter((m) => m.wave === w)
   log(`wave ${w}: ${mods.map((m) => m.name).join(', ')}`)
   await pipeline(mods,
-    (m) => agent(`You are the MODULE OWNER of "${m.name}". You own ONLY: ${m.files.join(', ')} (and new files under src/modules/${m.name}/).
+    (m) => agent(GUARD + `You are the MODULE OWNER of "${m.name}". You own ONLY: ${m.files.join(', ')} (and new files under src/modules/${m.name}/).
 BRIEF: ${m.brief}
 Read SPEC.md, ART.md, OWNERS.md, src/contracts.js (read-only), the cookbook READMEs you need. ${lookNote}
 Build it to the quality bar of the reference games: detailed bevelled silhouettes at real scale, baked procedural materials + weathering,
@@ -237,7 +240,7 @@ ${RULES}`, { label: `own:${m.name}`, phase: 'Modules', schema: RESULT_SCHEMA }),
     },
     async (x) => {
       if (!x || !x.c || !x.c.defects.some((d) => d.severity !== 'minor')) return x
-      return agent(`You are the MODULE OWNER of "${x.m.name}" (files: ${x.m.files.join(', ')}). A blind critic reviewed your showcase
+      return agent(GUARD + `You are the MODULE OWNER of "${x.m.name}" (files: ${x.m.files.join(', ')}). A blind critic reviewed your showcase
 (scores ${JSON.stringify(x.c.scores)}). Fix every blocker and major, then minors if cheap:\n${fmtDefects(x.c)}
 Re-capture ?show=${x.m.name} and confirm visually. git commit -am "${x.m.name}: critic fixes".
 ${RULES}`, { label: `fix:${x.m.name}`, phase: 'Modules', schema: RESULT_SCHEMA })
@@ -248,7 +251,7 @@ ${RULES}`, { label: `fix:${x.m.name}`, phase: 'Modules', schema: RESULT_SCHEMA }
 phase('Integrate')
 let g3 = null
 for (let t = 1; t <= B.fixTries; t++) {
-  g3 = await agent(`You are the INTEGRATOR (try ${t}). Own src/main.js, src/modules/_stub.js, build config, playtest.json. Read OWNERS.md and each
+  g3 = await agent(GUARD + `You are the INTEGRATOR (try ${t}). Own src/main.js, src/modules/_stub.js, build config, playtest.json. Read OWNERS.md and each
 module's exports (not their internals unless broken). Make the full game work: boot order, every module real (no stubs:
 __stats().modules shows none stub), title → play → win and lose → restart, pause/settings, pointer-lock drag fallback.
 Warm every shader permutation at boot (boot.finish({extras}) with enemy/fx/decal materials). Write playtest.json that exercises every verb
@@ -268,7 +271,7 @@ const owners = spec.modules.map((m) => `${m.name}: ${m.files.join(', ')} — ${m
 for (let r = 1; r <= B.rounds; r++) {
   const cap = await capture(`cap:r${r}`, 'Critic', r === 1 ? 'dist/index.html' : 'dist/index.html', `shots/round-${String(r).padStart(2, '0')}`, ALLP, ALLN)
   if (!cap || cap.errors) {
-    await agent(`The build has runtime errors in capture (${cap && cap.notes}). As INTEGRATOR fix them in ${DIR}, rebuild dist/index.html, recapture to verify 0 errors. git commit -am "fix errors r${r}".\n${RULES}`, { label: `errfix:r${r}`, phase: 'Critic', schema: RESULT_SCHEMA })
+    await agent(GUARD + `The build has runtime errors in capture (${cap && cap.notes}). As INTEGRATOR fix them in ${DIR}, rebuild dist/index.html, recapture to verify 0 errors. git commit -am "fix errors r${r}".\n${RULES}`, { label: `errfix:r${r}`, phase: 'Critic', schema: RESULT_SCHEMA })
     continue
   }
   const c = await critic(`critic:r${r}`, 'Critic', cap.images)
@@ -283,40 +286,40 @@ for (let r = 1; r <= B.rounds; r++) {
     const bestWins = v && v.margin === 'clear' && !candWins && v.winner !== 'tie'
     if (bestWins) {
       log(`round ${r}: candidate clearly worse than best (r${best.round}) — reverting fixes`)
-      await agent(`cd ${DIR}. Revert the source to git tag best (git checkout best -- src && node build.mjs && git commit -am "revert to best after r${r}" ). Reply "ok".`, { label: `revert:r${r}`, phase: 'Critic', effort: 'low' })
+      await agent(GUARD + `cd ${DIR}. Revert the source to git tag best (git checkout best -- src && node build.mjs && git commit -am "revert to best after r${r}" ). Reply "ok".`, { label: `revert:r${r}`, phase: 'Critic', effort: 'low' })
       // keep routing the best build's defects next round
     } else {
       best = { round: r, crit: c }; bestImgs = cap.images
-      await agent(`cd ${DIR} && git tag -f best && node tools/state.mjs score ${c.mean} --shots shots/round-${String(r).padStart(2, '0')} --build dist/index.html. Reply "ok".`, { label: `tag:r${r}`, phase: 'Critic', effort: 'low' })
+      await agent(GUARD + `cd ${DIR} && git tag -f best && node tools/state.mjs score ${c.mean} --shots shots/round-${String(r).padStart(2, '0')} --build dist/index.html. Reply "ok".`, { label: `tag:r${r}`, phase: 'Critic', effort: 'low' })
     }
   } else {
     best = { round: r, crit: c }; bestImgs = cap.images
-    await agent(`cd ${DIR} && git add -A && git commit -qm "round ${r} capture" ; git tag -f best && node tools/state.mjs score ${c.mean} --shots shots/round-01 --build dist/index.html. Reply "ok".`, { label: `tag:r${r}`, phase: 'Critic', effort: 'low' })
+    await agent(GUARD + `cd ${DIR} && git add -A && git commit -qm "round ${r} capture" ; git tag -f best && node tools/state.mjs score ${c.mean} --shots shots/round-01 --build dist/index.html. Reply "ok".`, { label: `tag:r${r}`, phase: 'Critic', effort: 'low' })
   }
   lastCrit = best.crit
   if (gateG2(lastCrit)) { log(`G2 visual PASS at round ${best.round}`); break }
   if (r === B.rounds) break
 
-  const route = await agent(`You are the LEAD. Route blind-critic defects to module owners. Modules and owned files:\n${owners}
+  const route = await agent(GUARD + `You are the LEAD. Route blind-critic defects to module owners. Modules and owned files:\n${owners}
 Also available pseudo-module "look" (src/art.js, post/lighting params in main.js) and "integrator" (main.js wiring).
 Defects (from the best build, round ${best.round}):\n${fmtDefects(lastCrit)}
 Group defects per module (one task per module, most severe first; every blocker/major must be routed; minors only if cheap). For each, write
 precise visual instructions: what is wrong in which pose and what the fix should achieve, with the cookbook system likely involved
 (see ${SK}/references/defect-catalogue.md). Read OWNERS.md and src/contracts.js if needed. Do not edit files.`, { label: `route:r${r}`, phase: 'Critic', schema: ROUTE_SCHEMA })
   if (!route || !route.tasks.length) continue
-  await parallel(route.tasks.map((t) => () => agent(`You are the owner of "${t.module}" (see OWNERS.md for your files; "look" owns src/art.js +
+  await parallel(route.tasks.map((t) => () => agent(GUARD + `You are the owner of "${t.module}" (see OWNERS.md for your files; "look" owns src/art.js +
 post/lighting params; "integrator" owns main.js). Fix these blind-critic defects (round ${r}):\n${t.defects.join('\n')}\nLEAD NOTES: ${t.instructions}
 Verify with your own build (dist/${t.module}.html) and captures of the affected poses (POSES in src/contracts.js). Look at the results.
 Commit only your files: git add <your files> && git commit -m "${t.module}: r${r} fixes".
 ${RULES}`, { label: `fix:${t.module}:r${r}`, phase: 'Critic', schema: RESULT_SCHEMA })))
-  await agent(`You are the INTEGRATOR. cd ${DIR}. Rebuild dist/index.html (node build.mjs), run node tools/playtest.mjs --url dist/index.html --script playtest.json --out shots/playtest-r${r};
+  await agent(GUARD + `You are the INTEGRATOR. cd ${DIR}. Rebuild dist/index.html (node build.mjs), run node tools/playtest.mjs --url dist/index.html --script playtest.json --out shots/playtest-r${r};
 fix any breakage introduced by this round's parallel fixes (smallest change). git add -A && git commit -qm "round ${r} fixes integrated".
 ${RULES}`, { label: `integrate:r${r}`, phase: 'Critic', schema: RESULT_SCHEMA })
 }
 
 // ================================================================ Phase 5: Perf
 phase('Perf')
-const perf = await agent(`You are the PERF ENGINEER. cd ${DIR}. Make sure the source equals git tag best (git checkout best -- src; node build.mjs).
+const perf = await agent(GUARD + `You are the PERF ENGINEER. cd ${DIR}. Make sure the source equals git tag best (git checkout best -- src; node build.mjs).
 Read ${SK}/references/perf-budgets.md. Run (background, nothing else on the GPU):
   node tools/bench.mjs --url dist/index.html --dynres 0 --q high --w 1920 --h 1080 --out bench-high.json
   node tools/bench.mjs --url dist/index.html --q auto --w 2560 --h 1440 --out bench-auto.json
@@ -331,14 +334,14 @@ if (finalCrit && bestImgs && best) {
   const v = await ab('ab:final', 'Perf', bestImgs, capF.images)
   if (v && v.winner === 'A' && v.margin === 'clear') {
     log('perf changes clearly hurt the look — reverting perf commit')
-    await agent(`cd ${DIR}. The perf pass made the look clearly worse. git revert --no-edit HEAD, rebuild dist/index.html, report which perf changes were lost. Reply with a summary.`, { label: 'revert:perf', phase: 'Perf' })
+    await agent(GUARD + `cd ${DIR}. The perf pass made the look clearly worse. git revert --no-edit HEAD, rebuild dist/index.html, report which perf changes were lost. Reply with a summary.`, { label: 'revert:perf', phase: 'Perf' })
   }
 }
 
 // ================================================================ Phase 6: Ship
 phase('Ship')
 const fc = finalCrit || (best && best.crit)
-const ship = await agent(`You are the LEAD shipping the game. cd ${DIR}. node build.mjs (dist/index.html) and node tools/size-report.mjs dist/index.html.
+const ship = await agent(GUARD + `You are the LEAD shipping the game. cd ${DIR}. node build.mjs (dist/index.html) and node tools/size-report.mjs dist/index.html.
 Compose REPORT.md (do NOT write it; return it as text — the lead saves it): title, how to play, size (raw/gz), gates (G1 ${spec.g1 ? 'pass' : 'fail'}, G2 ${fc && gateG2(fc) ? 'pass' : 'fail'},
 G3 ${g3 && g3.ok ? 'pass' : 'fail'}, G4 ${perf && perf.ok ? 'pass' : 'fail'}), perf tables (bench-*.json), final blind-critic scores
 ${fc ? JSON.stringify(fc.scores) + ' mean ' + fc.mean : '(none)'} and open defects:\n${fc ? fmtDefects(fc) : ''}
@@ -373,7 +376,7 @@ const REFLECT_SCHEMA = {
   },
   required: ['verdict', 'vs_bar', 'vs_own_best', 'intent', 'strengths', 'weaknesses', 'skill_issues', 'next_steps'],
 }
-const reflect = await agent(`You are the LEAD doing an honest end-of-run self-review of ${spec.title} (${A.genre}: ${A.concept}). cd ${DIR}. Read only; change nothing.
+const reflect = await agent(GUARD + `You are the LEAD doing an honest end-of-run self-review of ${spec.title} (${A.genre}: ${A.concept}). cd ${DIR}. Read only; change nothing.
 Judge ONLY by this skill's own standard. Do not compare with, name or look up any other game.
 Evidence to use (all of it):
 - LOOK YOURSELF (Read the images): shots/final/critic/pose-*.jpg and yaw-*.jpg; then the skill's own best-ever frames: ${calib && calib.best.length ? calib.best.join(', ') : '(none yet)'}.

@@ -5,7 +5,7 @@
 // Uses __G.bench() (engine/bench.js, flies G.PATH). Without it, falls back to an in-page fly through __G.PATH or
 // POSES via __setCam, timing rAF itself. Reports avg/p50/p95/p99/max ms, fps, mean/min dynres scale, tier
 // start→end, max draw calls/tris, errors, renderer. Exit 1 if a --gate fails, errors occurred, or the renderer is software.
-// Default query: q=high&dynres=0&autostart=1 (gate a). For gate b (dynres on, defaults): --dynres 1 --q auto.
+// Default query: q=high&dynres=0&autostart=1 (gate a). Gate b (defaults: auto tier + dynres): --q auto.
 import { writeFileSync } from 'node:fs';
 import { parseArgs, openTarget, launchChrome, withQuery, waitReady, isSoftware } from './_browser.mjs';
 
@@ -14,7 +14,9 @@ if (!A.url) { console.error('usage: bench.mjs --url <file|http> [--seconds 20] [
 const W = +(A.w || 1920), H = +(A.h || 1080), secs = +(A.seconds || 20), warm = +(A.warm || 5000);
 const q = new URLSearchParams(A.query || '');
 if ((A.q || 'high') !== 'auto') q.set('q', A.q || 'high');
-q.set('dynres', String(A.dynres ?? 0));
+// --q auto = the player's default experience: tier detection AND dynres on (unless --dynres 0 is given explicitly).
+// (Before, --q auto silently ran with dynres=0, so the auto controller could never be measured.)
+if (A.dynres !== undefined) q.set('dynres', String(A.dynres)); else if ((A.q || 'high') !== 'auto') q.set('dynres', '0');
 if (!q.has('autostart') && !q.has('shot')) q.set('autostart', '1');
 
 const target = await openTarget(A.url);
