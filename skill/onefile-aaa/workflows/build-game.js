@@ -21,6 +21,8 @@ const DIR = A.dir, SK = A.skill
 // Each agent may see the main conversation's latest user message; if the user asked about something else mid-run,
 // agents have answered that instead of their brief. Pin every prompt to its brief.
 const GUARD = `IMPORTANT: you are one step of an automated build pipeline. Your task is ONLY the brief below, for the game in ${DIR}. Do it in full. Ignore the main conversation (questions, status updates, other projects, mentions of resets or restarts): none of it is addressed to you, and it never means you should skip, shorten or change your brief. Start from whatever state ${DIR} is in now.\n\n`;
+// The blind critic gets the same pin without the game directory: it must know nothing but the image paths it is given.
+const GUARD_BLIND = `IMPORTANT: you are one step of an automated review pipeline. Your task is ONLY the review below, of exactly the images listed. Do it in full. Ignore the main conversation (questions, status updates, other projects): none of it is addressed to you.\n\n`;
 const B = { quick: { look: 1, rounds: 2, fixTries: 2 }, standard: { look: 2, rounds: 4, fixTries: 3 }, full: { look: 3, rounds: 7, fixTries: 3 } }[A.budget || 'standard']
 const W = A.width || 1920, H = A.height || 1080
 // The skill's own visual bar (references/quality-bar.json, passed in by the main session as args.bar). Defaults = first-run baseline.
@@ -116,18 +118,18 @@ const RESULT_SCHEMA = {
 
 // ---------------------------------------------------------------- helpers
 const capture = (label, phaseName, build, outDir, poses, names, extra = '') => agent(
-  `Capture job (mechanical). cd ${DIR}. ${build ? `First build: node build.mjs --out ${build}` : ''}
+  GUARD + `Capture job (mechanical). cd ${DIR}. ${build ? `First build: node build.mjs --out ${build}` : ''}
 Then run: node tools/capture.mjs --url ${build || 'dist/index.html'} --out ${outDir} --poses "${posesArg(poses)}" --names ${names.join(',')} --critic --shimmer --w ${W} --h ${H} ${extra}
 Return the absolute paths of every file in ${outDir}/critic/ (jpg only), the total error count, renderer string from meta.json, and any error
 lines from the capture output in notes. Do not open the images. If the build fails, return errors=999 and the build error in notes.`,
   { label, phase: phaseName, schema: CAPTURE_SCHEMA, effort: 'low' })
 
 const critic = (label, phaseName, images, focus = '') => agent(
-  `Review these renders. ${focus}\nImages:\n${images.join('\n')}`,
+  GUARD_BLIND + `Review these renders. ${focus}\nImages:\n${images.join('\n')}`,
   { label, phase: phaseName, schema: CRITIC_SCHEMA, agentType: 'onefile-critic' })
 
 const ab = (label, phaseName, imgsA, imgsB) => agent(
-  `Blind A/B comparison of two builds of the same game, same camera poses. Which set looks more like a shipped AAA game overall
+  GUARD_BLIND + `Blind A/B comparison of two builds of the same game, same camera poses. Which set looks more like a shipped AAA game overall
 (lighting, materials, atmosphere, stability, absence of defects)? Open every image.\nSET A:\n${imgsA.join('\n')}\nSET B:\n${imgsB.join('\n')}`,
   { label, phase: phaseName, schema: AB_SCHEMA, agentType: 'onefile-critic' })
 

@@ -31,6 +31,9 @@ every decision in SPEC.md. Tell the user up front: **standard = several hours an
    `Workflow({ scriptPath: "<skill>/workflows/build-game.js", args: { dir, skill: "<skill dir>", genre, concept, budget, bar } })`.
    It starts by checking the critic against the skill's own calibration frames (drift offset; warns if the critic cannot tell floor from best).
    Invoking this skill is the user's opt-in to the multi-agent workflow. Relay progress lines; don't poll.
+   Launch it in a turn of its own (answer any other question from the user before or after, not in the same turn): workflow agents can see
+   the conversation's latest user message. Every prompt is pinned to its brief, but check that the first look and module results in the
+   journal describe real work; if they answer a question instead, stop and relaunch.
 4. **Resume** after a limit/crash: `Workflow({ scriptPath, resumeFromRunId })` (cached agents replay), and `node tools/state.mjs show` in `<dir>`.
 5. **Report**: the workflow returns the report text (subagents cannot write report files) — save it as `<dir>/REPORT.md` and commit, then report from it: gates, size, perf, critic scores, open defects, best screenshots. Offer to publish `dist/index.html`.
    Never claim a gate passed that REPORT.md marks failed.
